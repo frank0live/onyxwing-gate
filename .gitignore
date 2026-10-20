@@ -1,0 +1,5 @@
+node_modules/
+ow-data/
+data/
+*.log
+.DS_Store
