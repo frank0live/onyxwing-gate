@@ -553,6 +553,103 @@ function resolveDataDir(hint = '/data') { // OW_APPLIED
   return dir;
 }
 
+// --- Module: lib/settings.js ---
+/**
+ * Operator settings written from the panel (ow-data/settings.json).
+ * Everything the panel exposes is stored here, so a deployment never needs a
+ * rebuild to change protocols, host or paths: edit the value, apply, and the
+ * gate re-reads it. Environment variables still win over this file.
+ */
+const OW_SETTINGS_FILE = 'settings.json';
+
+function owSettingsPath(dataDir) {
+  return path.join(dataDir, OW_SETTINGS_FILE);
+}
+
+function loadUserSettings(dataDir) {
+  try {
+    const raw = fs.readFileSync(owSettingsPath(dataDir), 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveUserSettings(dataDir, settings) {
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(owSettingsPath(dataDir), JSON.stringify(settings, null, 2), { encoding: 'utf8', mode: 0o600 });
+  return owSettingsPath(dataDir);
+}
+
+/** Deep-merge `src` into `target` in place (keeps object identity for live reload). */
+function owDeepAssign(target, src) {
+  for (const key of Object.keys(src || {})) {
+    const val = src[key];
+    if (val && typeof val === 'object' && !Array.isArray(val) && target[key] && typeof target[key] === 'object' && !Array.isArray(target[key])) {
+      owDeepAssign(target[key], val);
+    } else if (val !== undefined) {
+      target[key] = val;
+    }
+  }
+  return target;
+}
+
+/** Keys the panel is allowed to write. Anything else in the payload is ignored. */
+const OW_EDITABLE_SETTINGS = {
+  strings: ['domain', 'forceHost', 'nodePrefix', 'sniHy2', 'massProxyUrl', 'channelUrl', 'panelPath', 'supportUrl', 'supportName'],
+  numbers: ['publicPort'],
+  booleans: ['allowLocalHostLinks'],
+  protocols: ['vlessWs', 'vlessWsTls', 'vmessWs', 'vmessWsTls', 'trojanWs', 'trojanWsTls', 'vlessHttpUpgrade',
+    'vmessHttpUpgrade', 'trojanHttpUpgrade', 'vlessGrpc', 'vlessGrpcTls', 'trojanGrpcTls', 'vlessXhttp',
+    'ssWs', 'shadowsocks', 'reality', 'shadowTlsVless', 'socks', 'httpProxy', 'wireguard', 'tuic', 'argo']
+};
+
+/**
+ * Keep only known keys and coerce types, so a bad payload can never poison config.
+ * Returns { settings, ignored }.
+ */
+function owSanitizeSettings(payload) {
+  const out = {};
+  const ignored = [];
+  if (!payload || typeof payload !== 'object') return { settings: out, ignored };
+  const src = payload.settings && typeof payload.settings === 'object' ? payload.settings : payload;
+
+  for (const key of OW_EDITABLE_SETTINGS.strings) {
+    if (src[key] === undefined) continue;
+    // nodePrefix keeps trailing spaces: "MyNode - " is a valid, deliberate prefix.
+    const v = key === 'nodePrefix'
+      ? String(src[key]).replace(/[\r\n\t]/g, ' ').slice(0, 200)
+      : String(src[key]).trim();
+    if (v.length > 200) { ignored.push(key); continue; }
+    out[key] = key === 'panelPath' ? v.replace(/[^a-zA-Z0-9_\-]/g, '') : v;
+  }
+  for (const key of OW_EDITABLE_SETTINGS.numbers) {
+    if (src[key] === undefined) continue;
+    const n = parseInt(src[key], 10);
+    if (!Number.isFinite(n) || n < 1 || n > 65535) { ignored.push(key); continue; }
+    out[key] = n;
+  }
+  for (const key of OW_EDITABLE_SETTINGS.booleans) {
+    if (src[key] === undefined) continue;
+    out[key] = src[key] === true || src[key] === 'true' || src[key] === 1 || src[key] === '1';
+  }
+  if (src.enable && typeof src.enable === 'object') {
+    const enable = {};
+    for (const key of OW_EDITABLE_SETTINGS.protocols) {
+      if (src.enable[key] === undefined) continue;
+      enable[key] = src.enable[key] === true || src.enable[key] === 'true' || src.enable[key] === 1 || src.enable[key] === '1';
+    }
+    if (Object.keys(enable).length) out.enable = enable;
+    for (const key of Object.keys(src.enable)) if (!OW_EDITABLE_SETTINGS.protocols.includes(key)) ignored.push('enable.' + key);
+  }
+  for (const key of Object.keys(src)) {
+    if (['enable'].concat(OW_EDITABLE_SETTINGS.strings, OW_EDITABLE_SETTINGS.numbers, OW_EDITABLE_SETTINGS.booleans).includes(key)) continue;
+    ignored.push(key);
+  }
+  return { settings: out, ignored };
+}
+
 /**
  * Merge user runtime config with environment variables and defaults
  */
@@ -569,6 +666,20 @@ function buildConfig(userOverrides = {}) {
           cfg[key] = val;
         }
       }
+    }
+  }
+
+  // Panel settings (ow-data/settings.json) override the built-in defaults, so an operator can
+  // change protocols / host / paths from the web panel without a rebuild. Environment variables
+  // still win over the file (deploy-time config beats a stale file).
+  {
+    const settingsDir = resolveDataDir(cfg.dataDirHint);
+    const stored = loadUserSettings(settingsDir);
+    if (stored && Object.keys(stored).length) {
+      const { settings } = owSanitizeSettings(stored);
+      owDeepAssign(cfg, settings);
+      cfg._settingsFile = owSettingsPath(settingsDir);
+      cfg._loadedFromSettings = Object.keys(settings);
     }
   }
 
