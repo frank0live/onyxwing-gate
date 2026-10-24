@@ -59,10 +59,6 @@ No database, no build step — upload and run.
 
 - 💬 Telegram: [@master_supports](https://t.me/master_supports)
 
-## Credits
-
-Forked & heavily restyled from **Blue Knight Gate** by [BlueKnightNet](https://github.com/BlueKnightNet) — thanks for the solid base. Original: https://github.com/BlueKnightNet/Blue-Knight-Panel-V3
-
 ## License
 
 MIT — see [LICENSE](LICENSE)
