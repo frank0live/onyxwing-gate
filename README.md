@@ -18,6 +18,7 @@ No database, no build step — upload and run.
 
 - **One port, many protocols** — everything multiplexed on the single public port
 - Web panel with QR codes, subscription links, traffic stats
+- **Settings page** — host, node prefix, panel path and every protocol toggle, applied without redeploying
 - Subscription generator: Base64 / Clash / sing-box / WireGuard
 - **Panel outbounds** — one click exports each node as Xray outbound JSON (works as a node in 3x-ui / s-ui / x-ui), TLS pinned via `pinnedPeerCertSha256` so it loads on modern xray-core
 - Themes: **Dark Cinema** (obsidian/emerald) & **Cozy** (midnight teal)
@@ -54,7 +55,26 @@ No database, no build step — upload and run.
 
 ## Optional env vars
 
-`PORT`/`SERVER_PORT`, `OW_DATA_DIR`, `PANEL_PASSWORD`, `SUB_TOKEN`, `LINK_HOST`/`LINK_PORT`, `UUID`, `TRAFFIC_LIMIT_GB`, `XRAY_VERSION` — set what you need, defaults are fine for most cases.
+`PORT`/`SERVER_PORT`, `BIND_ADDR`, `OW_DATA_DIR`, `PANEL_PASSWORD`, `SUB_TOKEN`, `LINK_HOST`/`LINK_PORT`, `UUID`, `TRAFFIC_LIMIT_GB`, `XRAY_VERSION` — set what you need, defaults are fine for most cases.
+
+## Settings
+
+Env vars set the starting point; after that everything lives in `ow-data/settings.json` and can be
+changed from **Settings** in the panel:
+
+- domain / forced host, node name prefix, panel path, public port
+- per-protocol on/off switches (HTTPUpgrade, gRPC, XHTTP, REALITY, WireGuard…)
+
+Saving restarts the engines and rebuilds every subscription link in place. Panel path and public
+port are bound when the process boots, so those two ask for a restart. Unknown keys and
+out-of-range values are rejected instead of written, so a typo can't break the config.
+
+```json
+{
+  "nodePrefix": "OnyxWing - ",
+  "enable": { "vlessHttpUpgrade": false, "reality": true }
+}
+```
 
 ## Support
 
