@@ -5264,6 +5264,10 @@ async function startGate(userConfig = {}) {
   Logger.item('Public Port', config.publicPort);
   Logger.item('Panel Path', `/${config.panelPath}`);
   Logger.item('Data Directory', config.paths.dataDir);
+
+  // 2b. Per-user bands (users.json) and byte metering
+  owUsers.init(config.paths.dataDir);
+  owStartUsageMetering();
   {
     const dInfo = resolveDataDir.info || { source: 'unknown' };
     const onRw = !!(process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_SERVICE_ID || process.env.RAILWAY_PUBLIC_DOMAIN);
