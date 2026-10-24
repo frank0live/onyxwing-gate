@@ -19,6 +19,7 @@ No database, no build step — upload and run.
 - **One port, many protocols** — everything multiplexed on the single public port
 - Web panel with QR codes, subscription links, traffic stats
 - Subscription generator: Base64 / Clash / sing-box / WireGuard
+- **Panel outbounds** — one click exports each node as Xray outbound JSON (works as a node in 3x-ui / s-ui / x-ui), TLS pinned via `pinnedPeerCertSha256` so it loads on modern xray-core
 - Themes: **Dark Cinema** (obsidian/emerald) & **Cozy** (midnight teal)
 - Password-protected panel (scrypt), brute-force lockout, 30-day sessions
 - Auto-downloads **sing-box** & **Xray-core** on first start (SHA-256 checked)
