@@ -2349,7 +2349,7 @@ class LinkGenerator {
   generateVlessWs() {
     if (!this.config.enable.vlessWs) return null;
     if (this.edgeTls) return null; // covered by VLESS-WS-TLS (same inbound)
-    const name = 'OnyxWing - WS';
+    const name = this.name('WS');
     const clashProxy = {
       name,
       type: 'vless',
@@ -2389,7 +2389,7 @@ class LinkGenerator {
 
   generateVlessWsTls() {
     if (!this.config.enable.vlessWsTls) return null;
-    const name = 'OnyxWing - WS-TLS';
+    const name = this.name('WS-TLS');
     const o = this.tlsOpt;
     const clashProxy = this._clashTls({
       name, type: 'vless', server: this.host, port: this.port, uuid: this.state.uuid, network: 'ws',
@@ -2414,7 +2414,7 @@ class LinkGenerator {
 
   generateVmessWsTls() {
     if (!this.config.enable.vmessWsTls) return null;
-    const name = 'OnyxWing - VMess-WS-TLS';
+    const name = this.name('VMess-WS-TLS');
     const o = this.tlsOpt;
     const vmessConfig = {
       v: '2', ps: name, add: this.host, port: String(this.port), id: this.state.uuid, aid: '0', scy: 'auto',
@@ -2449,7 +2449,7 @@ class LinkGenerator {
   generateVmessWs() {
     if (!this.config.enable.vmessWs) return null;
     if (this.edgeTls) return null; // covered by VMess-WS-TLS (same inbound)
-    const name = 'OnyxWing - VMess-WS';
+    const name = this.name('VMess-WS');
     const vmessConfig = {
       v: '2',
       ps: name,
@@ -2621,7 +2621,7 @@ class LinkGenerator {
         return null;
       }
     }
-    const name = 'OnyxWing - Reality';
+    const name = this.name('Reality');
     const target = String(this.config.reality.target || 'www.microsoft.com').replace(/[\[\]]/g, '').trim();
     const shortId = this.state.realityShortId || '12345678';
     const clashProxy = {
@@ -2671,7 +2671,7 @@ class LinkGenerator {
 
   generateShadowTls() {
     if (!this.config.enable.shadowTlsVless || !this.state.shadowTlsPassword) return null;
-    const name = 'OnyxWing - ShadowTLS';
+    const name = this.name('ShadowTLS');
     const sni = String(this.config.shadowTls.sni || 'www.microsoft.com').replace(/[\[\]]/g, '').trim();
     const clashProxy = {
       name,
@@ -2718,7 +2718,7 @@ class LinkGenerator {
 
   generateShadowsocks() {
     if (!this.config.enable.shadowsocks || !this.state.shadowsocksPassword) return null;
-    const name = 'OnyxWing - Shadowsocks';
+    const name = this.name('Shadowsocks');
     const method = this.config.shadowsocks.method || 'aes-256-gcm';
     const auth = Buffer.from(`${method}:${this.state.shadowsocksPassword}`).toString('base64');
     const clashProxy = {
@@ -2808,7 +2808,7 @@ class LinkGenerator {
 
       if (!clientPrivateKey || !serverPublicKey) return null;
 
-      const name = 'OnyxWing - WireGuard';
+      const name = this.name('WireGuard');
       const port = (this.config.wireguard && this.config.wireguard.port) || this.port || 51820;
       const clientIp = (this.config.wireguard && this.config.wireguard.clientIp) || '10.66.66.2/32';
       const ifaceAddress = clientIp.endsWith('/32') ? clientIp.replace('/32', '/24') : clientIp;
@@ -2874,7 +2874,7 @@ class LinkGenerator {
 
   generateTuic() {
     if (!this.config.enable.tuic) return null;
-    const name = 'OnyxWing - TUIC';
+    const name = this.name('TUIC');
     const port = this.config.tuic.port || 8443;
     const sni = this.config.sniHy2 || 'www.google.com';
     const cc = this.config.tuic.congestionController || 'bbr';
@@ -2934,7 +2934,7 @@ class LinkGenerator {
     if (!this.config.enable.vlessXhttp) return null;
     if (this.config.xhttpPort === null) return null; // Xray-core failed to start
     if (this.edgeTls) {
-      const name = 'OnyxWing - XHTTP-TLS';
+      const name = this.name('XHTTP-TLS');
       const o = this.tlsOpt;
       const x = LinkGenerator.xhttpOptions();
       let q = '&sni=' + encodeURIComponent(o.sni);
@@ -2964,7 +2964,7 @@ class LinkGenerator {
 
   generateArgo(argoDomain) {
     if (!this.config.enable.argo || !argoDomain) return null;
-    const name = 'OnyxWing - Argo';
+    const name = this.name('Argo');
     const clashProxy = {
       name,
       type: 'vless',
@@ -3009,7 +3009,7 @@ class LinkGenerator {
   generateTrojanWs() {
     if (!this.config.enable.trojanWs) return null;
     if (this.edgeTls) {
-      const name = 'OnyxWing - Trojan-WS-TLS';
+      const name = this.name('Trojan-WS-TLS');
       const o = this.tlsOpt;
       const sbOutbound = {
         type: 'trojan', tag: name, server: this.host, server_port: this.port, password: this.state.uuid,
@@ -3030,7 +3030,7 @@ class LinkGenerator {
         singboxJson: JSON.stringify([sbOutbound], null, 2)
       };
     }
-    const name = 'OnyxWing - Trojan-WS';
+    const name = this.name('Trojan-WS');
     const trPath = this.trPath;
     const clashProxy = {
       name,
@@ -3071,7 +3071,7 @@ class LinkGenerator {
 
   generateTrojanGrpcTls() {
     if (!this.config.enable.trojanGrpcTls) return null;
-    const name = 'OnyxWing - gRPC';
+    const name = this.name('gRPC');
     const sni = this.config.domain || this.host;
     const serviceName = this.grpcService;
     const clashProxy = {
