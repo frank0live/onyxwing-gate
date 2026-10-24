@@ -2231,6 +2231,36 @@ class SingBoxEngine {
       return false;
     }
 
+    // Users with traffic left get their own UUID in every inbound that accepts one, so their
+    // subscription can hand out a credential that is theirs alone.
+    const activeUuids = owUsers.all()
+      .filter(u => owUsers.status(u).enabled)
+      .map(u => u.uuid)
+      .filter(Boolean);
+    if (activeUuids.length) {
+      let added = 0;
+      for (const ib of configData.inbounds || []) {
+        if (!Array.isArray(ib.users) || !ib.users.length) continue;
+        const proto = String(ib.type || '');
+        const templ = ib.users[0];
+        for (const uu of activeUuids) {
+          if (ib.users.some(x => x.uuid === uu)) continue;
+          const extra = proto === 'vmess'
+            ? { uuid: uu, alterId: templ.alterId || 0 }
+            : { uuid: uu, flow: templ.flow || '' };
+          if (proto === 'shadowsocks' || proto === 'trojan') {
+            // these take a password, not a UUID
+            if (ib.users.some(x => x.password === uu)) continue;
+            ib.users.push({ password: uu });
+          } else {
+            ib.users.push(extra);
+          }
+          added++;
+        }
+      }
+      if (added) Logger.info(`Users: added ${added} credential(s) across inbounds.`);
+    }
+
     fs.writeFileSync(this.paths.singboxConfig, JSON.stringify(configData, null, 2), 'utf8');
     Logger.success('sing-box configuration validated.');
 
