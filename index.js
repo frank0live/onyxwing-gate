@@ -18,6 +18,7 @@ const OW_CONFIG = {
   supportName: "",
   supportUrl: "",
   publicPort: parseInt(process.env.PORT || process.env.SERVER_PORT || '8080', 10) || 8080,
+  bindAddr: process.env.BIND_ADDR || '0.0.0.0',
   panelPath: "wing",
   dataDirHint: "/data",
   uuid: "",
@@ -443,6 +444,7 @@ const DEFAULT_CONFIG = {
   supportUrl: '',
   supportName: '',
   publicPort: parseInt(process.env.PORT || process.env.SERVER_PORT || '8080', 10) || 8080,
+  bindAddr: process.env.BIND_ADDR || '0.0.0.0',
   panelPath: 'wing',
   dataDirHint: '/data',
   uuid: '',
@@ -4699,8 +4701,9 @@ class TcpRouter {
     });
 
     return new Promise((resolve, reject) => {
-      this.server.listen(this.config.publicPort, '0.0.0.0', () => {
-        Logger.success(`Public TCP multiplexer listening on 0.0.0.0:${this.config.publicPort}`);
+      const bindAddr = this.config.bindAddr || '0.0.0.0';
+      this.server.listen(this.config.publicPort, bindAddr, () => {
+        Logger.success(`Public TCP multiplexer listening on ${bindAddr}:${this.config.publicPort}`);
         resolve(this.server);
       });
       this.server.on('error', reject);
