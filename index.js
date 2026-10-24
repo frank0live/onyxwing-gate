@@ -2717,6 +2717,20 @@ class LinkGenerator {
     this.pcs = (this.insecure && config.paths && config.paths.certPath) ? bkCertSha256(config.paths.certPath) : '';
     this.keepAllowInsecure = this.insecure && !/^(0|false|no|off)$/i.test(String(process.env.LINK_ALLOW_INSECURE || ''));
     this.name = (t) => (config.nodePrefix || 'OnyxWing - ') + t;
+    // Personal subscriptions rewrite every transport path to "<slug>-<token>-<kind>" so the server
+    // can tell whose connection it is. Shared subscriptions pass no token and keep the public paths.
+    this.personal = config.personalToken ? String(config.personalToken) : '';
+  }
+
+  /** Transport path for this subscription: the personal one when it is a user's own config. */
+  pathFor(kind) {
+    const shared = {
+      ws: this.wsPath, vmess: this.vmessPath, trojan: this.trPath,
+      hu: this.huPath, 'vmess-hu': this.vmHuPath, 'trojan-hu': this.trHuPath,
+      xh: this.xhPath, ss: this.ssWsPath
+    }[kind];
+    if (!this.personal) return shared;
+    return `/${this.personal}-${kind}`;
   }
 
   /** Readable host for Host headers: the TLS/WS host override if set, else the link host. */
@@ -2812,7 +2826,7 @@ class LinkGenerator {
       network: 'ws',
       tls: false,
       'ws-opts': {
-        path: this.wsPath,
+        path: this.pathFor('ws'),
         headers: { Host: this.host }
       }
     };
@@ -2824,7 +2838,7 @@ class LinkGenerator {
       uuid: this.state.uuid,
       transport: {
         type: 'ws',
-        path: this.wsPath,
+        path: this.pathFor('ws'),
         headers: { Host: this.host }
       }
     };
@@ -2833,7 +2847,7 @@ class LinkGenerator {
       type: 'VLESS-WS',
       label: 'WebSocket Direct / CDN',
       compat: true,
-      uri: `vless://${this.state.uuid}@${this.host}:${this.port}?encryption=none&security=none&type=ws&host=${this.host}&path=${urlSafeEncode(this.wsPath)}#${urlSafeEncode(name)}`,
+      uri: `vless://${this.state.uuid}@${this.host}:${this.port}?encryption=none&security=none&type=ws&host=${this.host}&path=${urlSafeEncode(this.pathFor('ws'))}#${urlSafeEncode(name)}`,
       clash: clashProxy,
       singboxOutbound: [sbOutbound],
       singboxJson: JSON.stringify([sbOutbound], null, 2)
@@ -2846,19 +2860,19 @@ class LinkGenerator {
     const o = this.tlsOpt;
     const clashProxy = this._clashTls({
       name, type: 'vless', server: this.host, port: this.port, uuid: this.state.uuid, network: 'ws',
-      'ws-opts': { path: this.wsPath, headers: { Host: o.wsHost } }
+      'ws-opts': { path: this.pathFor('ws'), headers: { Host: o.wsHost } }
     });
     const sbOutbound = {
       type: 'vless', tag: name, server: this.host, server_port: this.port, uuid: this.state.uuid,
       tls: this._sbTls(),
-      transport: { type: 'ws', path: this.wsPath, headers: { Host: o.wsHost } }
+      transport: { type: 'ws', path: this.pathFor('ws'), headers: { Host: o.wsHost } }
     };
     return {
       name,
       type: 'VLESS-WS-TLS',
       label: 'CDN Cloudflare Compatible',
       compat: true,
-      uri: `vless://${this.state.uuid}@${this.host}:${this.port}?encryption=none&security=tls${this._uriTls()}&type=ws&host=${encodeURIComponent(o.wsHost)}&path=${urlSafeEncode(this.wsPath)}#${urlSafeEncode(name)}`,
+      uri: `vless://${this.state.uuid}@${this.host}:${this.port}?encryption=none&security=tls${this._uriTls()}&type=ws&host=${encodeURIComponent(o.wsHost)}&path=${urlSafeEncode(this.pathFor('ws'))}#${urlSafeEncode(name)}`,
       clash: clashProxy,
       singboxOutbound: [sbOutbound],
       singboxJson: JSON.stringify([sbOutbound], null, 2)
@@ -2871,7 +2885,7 @@ class LinkGenerator {
     const o = this.tlsOpt;
     const vmessConfig = {
       v: '2', ps: name, add: this.host, port: String(this.port), id: this.state.uuid, aid: '0', scy: 'auto',
-      net: 'ws', type: 'none', host: o.wsHost, path: this.vmessPath, tls: 'tls', sni: o.sni
+      net: 'ws', type: 'none', host: o.wsHost, path: this.pathFor('vmess'), tls: 'tls', sni: o.sni
     };
     if (o.alpn.length) vmessConfig.alpn = o.alpn.join(',');
     if (o.fp) vmessConfig.fp = o.fp;
@@ -2880,12 +2894,12 @@ class LinkGenerator {
     const uri = 'vmess://' + Buffer.from(JSON.stringify(vmessConfig)).toString('base64');
     const clashProxy = this._clashTls({
       name, type: 'vmess', server: this.host, port: this.port, uuid: this.state.uuid, alterId: 0, cipher: 'auto', network: 'ws',
-      'ws-opts': { path: this.vmessPath, headers: { Host: o.wsHost } }
+      'ws-opts': { path: this.pathFor('vmess'), headers: { Host: o.wsHost } }
     });
     const sbOutbound = {
       type: 'vmess', tag: name, server: this.host, server_port: this.port, uuid: this.state.uuid, alter_id: 0, security: 'auto',
       tls: this._sbTls(),
-      transport: { type: 'ws', path: this.vmessPath, headers: { Host: o.wsHost } }
+      transport: { type: 'ws', path: this.pathFor('vmess'), headers: { Host: o.wsHost } }
     };
     return {
       name,
@@ -2914,7 +2928,7 @@ class LinkGenerator {
       net: 'ws',
       type: 'none',
       host: this.host,
-      path: this.vmessPath,
+      path: this.pathFor('vmess'),
       tls: 'none'
     };
     const uri = 'vmess://' + Buffer.from(JSON.stringify(vmessConfig)).toString('base64');
@@ -2929,7 +2943,7 @@ class LinkGenerator {
       network: 'ws',
       tls: false,
       'ws-opts': {
-        path: this.vmessPath,
+        path: this.pathFor('vmess'),
         headers: { Host: this.host }
       }
     };
@@ -2943,7 +2957,7 @@ class LinkGenerator {
       security: 'auto',
       transport: {
         type: 'ws',
-        path: this.vmessPath,
+        path: this.pathFor('vmess'),
         headers: { Host: this.host }
       }
     };
@@ -2994,9 +3008,9 @@ class LinkGenerator {
     };
   }
 
-  generateVlessHttpUpgrade() { return this._httpUpgradeNode('vless', this.config.enable.vlessHttpUpgrade, this.huPath, 'VLESS-HTTPUpgrade'); }
-  generateVmessHttpUpgrade() { return this._httpUpgradeNode('vmess', this.config.enable.vmessHttpUpgrade, this.vmHuPath, 'VMess-HTTPUpgrade'); }
-  generateTrojanHttpUpgrade() { return this._httpUpgradeNode('trojan', this.config.enable.trojanHttpUpgrade, this.trHuPath, 'Trojan-HTTPUpgrade'); }
+  generateVlessHttpUpgrade() { return this._httpUpgradeNode('vless', this.config.enable.vlessHttpUpgrade, this.pathFor('hu'), 'VLESS-HTTPUpgrade'); }
+  generateVmessHttpUpgrade() { return this._httpUpgradeNode('vmess', this.config.enable.vmessHttpUpgrade, this.pathFor('vmess-hu'), 'VMess-HTTPUpgrade'); }
+  generateTrojanHttpUpgrade() { return this._httpUpgradeNode('trojan', this.config.enable.trojanHttpUpgrade, this.pathFor('trojan-hu'), 'Trojan-HTTPUpgrade'); }
 
   /** Trojan-WS-TLS on a self-hosted port: TLS is terminated by the gate's internal HTTPS server (self-signed cert). */
   generateTrojanWsTls() {
@@ -3007,14 +3021,14 @@ class LinkGenerator {
     const sbOutbound = {
       type: 'trojan', tag: name, server: this.host, server_port: this.port, password: this.state.uuid,
       tls: this._sbTls(),
-      transport: { type: 'ws', path: this.trPath, headers: { Host: o.wsHost } }
+      transport: { type: 'ws', path: this.pathFor('trojan'), headers: { Host: o.wsHost } }
     };
     return {
       name, type: 'Trojan-WS-TLS', label: 'Trojan WebSocket TLS', compat: true,
-      uri: `trojan://${this.state.uuid}@${this.host}:${this.port}?security=tls${this._uriTls()}&type=ws&host=${encodeURIComponent(o.wsHost)}&path=${urlSafeEncode(this.trPath)}#${urlSafeEncode(name)}`,
+      uri: `trojan://${this.state.uuid}@${this.host}:${this.port}?security=tls${this._uriTls()}&type=ws&host=${encodeURIComponent(o.wsHost)}&path=${urlSafeEncode(this.pathFor('trojan'))}#${urlSafeEncode(name)}`,
       clash: this._clashTls({
         name, type: 'trojan', server: this.host, port: this.port, password: this.state.uuid, network: 'ws',
-        'ws-opts': { path: this.trPath, headers: { Host: o.wsHost } }
+        'ws-opts': { path: this.pathFor('trojan'), headers: { Host: o.wsHost } }
       }, 'sni'),
       singboxOutbound: [sbOutbound], singboxJson: JSON.stringify([sbOutbound], null, 2)
     };
@@ -3051,12 +3065,12 @@ class LinkGenerator {
     const userinfo = /^2022-/i.test(method)
       ? encodeURIComponent(method) + ':' + encodeURIComponent(pass)
       : Buffer.from(`${method}:${pass}`).toString('base64url');
-    const pluginOpts = `mode=websocket;host=${hostHdr};path=${this.ssWsPath};mux=0`;
+    const pluginOpts = `mode=websocket;host=${hostHdr};path=${this.pathFor('ss')};mux=0`;
     const sbOutbound = { type: 'shadowsocks', tag: name, server: this.host, server_port: this.port, method, password: pass, plugin: 'v2ray-plugin', plugin_opts: pluginOpts };
     return {
       name, type: 'Shadowsocks-WS', label: 'Shadowsocks + v2ray-plugin (WebSocket)', compat: true,
       uri: `ss://${userinfo}@${this.host}:${this.port}/?plugin=${encodeURIComponent('v2ray-plugin;' + pluginOpts)}#${urlSafeEncode(name)}`,
-      clash: { name, type: 'ss', server: this.host, port: this.port, cipher: method, password: pass, plugin: 'v2ray-plugin', 'plugin-opts': { mode: 'websocket', host: hostHdr, path: this.ssWsPath, tls: false, mux: false } },
+      clash: { name, type: 'ss', server: this.host, port: this.port, cipher: method, password: pass, plugin: 'v2ray-plugin', 'plugin-opts': { mode: 'websocket', host: hostHdr, path: this.pathFor('ss'), tls: false, mux: false } },
       singboxOutbound: [sbOutbound], singboxJson: JSON.stringify([sbOutbound], null, 2),
       note: 'Shadowsocks + v2ray-plugin (websocket, mux=0): v2rayN / v2rayNG / Hiddify / sing-box / Clash Meta'
     };
@@ -3399,7 +3413,7 @@ class LinkGenerator {
         label: 'VLESS-XHTTP-TLS',
         note: 'VLESS-XHTTP-TLS (Xray clients: v2rayNG, v2rayN, Hiddify w/ xray core)',
         compat: true, // v2ray subscription only; no Clash / sing-box outbound (unsupported there)
-        uri: `vless://${this.state.uuid}@${this.host}:${this.port}?encryption=none&security=tls${q}&type=xhttp&host=${encodeURIComponent(o.wsHost)}&path=${urlSafeEncode(this.xhPath)}&mode=${x.mode}#${urlSafeEncode(name)}`,
+        uri: `vless://${this.state.uuid}@${this.host}:${this.port}?encryption=none&security=tls${q}&type=xhttp&host=${encodeURIComponent(o.wsHost)}&path=${urlSafeEncode(this.pathFor('xh'))}&mode=${x.mode}#${urlSafeEncode(name)}`,
         clash: null
       };
     }
@@ -3410,7 +3424,7 @@ class LinkGenerator {
       label: 'VLESS XHTTP',
       note: 'VLESS-XHTTP (Xray-core clients: v2rayN, v2rayNG, Hiddify w/ xray core)',
       compat: true, // OW_APPLIED: listed in the normal subscription too (Xray clients support xhttp)
-      uri: `vless://${this.state.uuid}@${this.host}:${this.port}?encryption=none&security=none&type=xhttp&host=${encodeURIComponent(this.plainHost)}&path=${urlSafeEncode(this.xhPath)}&mode=packet-up#${urlSafeEncode(name)}`,
+      uri: `vless://${this.state.uuid}@${this.host}:${this.port}?encryption=none&security=none&type=xhttp&host=${encodeURIComponent(this.plainHost)}&path=${urlSafeEncode(this.pathFor('xh'))}&mode=packet-up#${urlSafeEncode(name)}`,
       clash: null
     };
   }
@@ -3428,7 +3442,7 @@ class LinkGenerator {
       tls: true,
       servername: argoDomain,
       'ws-opts': {
-        path: this.wsPath,
+        path: this.pathFor('ws'),
         headers: { Host: argoDomain }
       }
     };
@@ -3444,7 +3458,7 @@ class LinkGenerator {
       },
       transport: {
         type: 'ws',
-        path: this.wsPath,
+        path: this.pathFor('ws'),
         headers: { Host: argoDomain }
       }
     };
@@ -3452,7 +3466,7 @@ class LinkGenerator {
       name,
       type: 'VLESS-Argo',
       compat: true,
-      uri: `vless://${this.state.uuid}@${argoDomain}:443?encryption=none&security=tls&sni=${argoDomain}&type=ws&host=${argoDomain}&path=${urlSafeEncode(this.wsPath)}#${urlSafeEncode(name)}`,
+      uri: `vless://${this.state.uuid}@${argoDomain}:443?encryption=none&security=tls&sni=${argoDomain}&type=ws&host=${argoDomain}&path=${urlSafeEncode(this.pathFor('ws'))}#${urlSafeEncode(name)}`,
       clash: clashProxy,
       singboxOutbound: [sbOutbound],
       singboxJson: JSON.stringify([sbOutbound], null, 2)
@@ -3467,24 +3481,24 @@ class LinkGenerator {
       const sbOutbound = {
         type: 'trojan', tag: name, server: this.host, server_port: this.port, password: this.state.uuid,
         tls: this._sbTls(),
-        transport: { type: 'ws', path: this.trPath, headers: { Host: o.wsHost } }
+        transport: { type: 'ws', path: this.pathFor('trojan'), headers: { Host: o.wsHost } }
       };
       return {
         name,
         type: 'Trojan-WS-TLS',
         label: 'Trojan WebSocket TLS',
         compat: true,
-        uri: `trojan://${this.state.uuid}@${this.host}:${this.port}?security=tls${this._uriTls()}&type=ws&host=${encodeURIComponent(o.wsHost)}&path=${urlSafeEncode(this.trPath)}#${urlSafeEncode(name)}`,
+        uri: `trojan://${this.state.uuid}@${this.host}:${this.port}?security=tls${this._uriTls()}&type=ws&host=${encodeURIComponent(o.wsHost)}&path=${urlSafeEncode(this.pathFor('trojan'))}#${urlSafeEncode(name)}`,
         clash: this._clashTls({
           name, type: 'trojan', server: this.host, port: this.port, password: this.state.uuid, network: 'ws',
-          'ws-opts': { path: this.trPath, headers: { Host: o.wsHost } }
+          'ws-opts': { path: this.pathFor('trojan'), headers: { Host: o.wsHost } }
         }, 'sni'),
         singboxOutbound: [sbOutbound],
         singboxJson: JSON.stringify([sbOutbound], null, 2)
       };
     }
     const name = this.name('Trojan-WS');
-    const trPath = this.trPath;
+    const trPath = this.pathFor('trojan');
     const clashProxy = {
       name,
       type: 'trojan',
