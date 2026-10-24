@@ -1797,6 +1797,10 @@ class SingBoxEngine {
 
     const inbounds = [];
 
+    // Admin API: per-connection counters, mapped back to users by source port (see owUsageLoop).
+    // It listens on loopback only and is not part of any client path.
+    const clashApiPort = OW_CLASH_API_PORT;
+
     // 1. VMess + WebSocket (TCP) local inbound
     if ((enable.vmessWs || enable.vmessWsTls) && this.ports.vmessWs) {
       inbounds.push({
@@ -2106,6 +2110,12 @@ class SingBoxEngine {
         strategy: 'prefer_ipv4'
       },
       inbounds,
+      experimental: {
+        clash_api: {
+          external_controller: `127.0.0.1:${clashApiPort}`,
+          default_mode: 'direct'
+        }
+      },
       outbounds: [
         { type: 'direct', tag: 'direct', domain_strategy: 'prefer_ipv4' },
         { type: 'block', tag: 'block' }
