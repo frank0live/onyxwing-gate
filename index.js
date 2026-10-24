@@ -5325,6 +5325,15 @@ async function startGate(userConfig = {}) {
     await new Promise((r) => setTimeout(r, 500));
   }
 
+  // Adding or removing a user changes which UUIDs sing-box accepts, so the engines have to come
+  // back up. The panel calls this after a user is created, rotated or deleted.
+  async function restartForUsers() {
+    owUsers.save();
+    await stopEngines();
+    await startEngines();
+    return { ok: true };
+  }
+
   async function startEngines() {
     const allocatedPorts = gate.allocatedPorts;
     for (const key of Object.keys(allocatedPorts)) delete allocatedPorts[key];
@@ -5446,7 +5455,8 @@ async function startGate(userConfig = {}) {
       sniHy2: config.sniHy2, massProxyUrl: config.massProxyUrl, channelUrl: config.channelUrl,
       panelPath: config.panelPath, publicPort: config.publicPort,
       allowLocalHostLinks: config.allowLocalHostLinks, enable: { ...config.enable }
-    })
+    }),
+    restartForUsers
   });
   const tcpRouter = new TcpRouter(config, gate.allocatedPorts, expressServer, expressApp);
   await tcpRouter.start();
