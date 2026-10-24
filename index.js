@@ -1682,9 +1682,16 @@ class SingBoxEngine {
         level: 'info',
         timestamp: true
       },
+      dns: {
+        servers: [
+          { address: 'local', strategy: 'prefer_ipv4' },
+          { address: 'udp://1.1.1.1', strategy: 'prefer_ipv4' }
+        ],
+        strategy: 'prefer_ipv4'
+      },
       inbounds,
       outbounds: [
-        { type: 'direct', tag: 'direct' },
+        { type: 'direct', tag: 'direct', domain_strategy: 'prefer_ipv4' },
         { type: 'block', tag: 'block' }
       ],
       route: {
@@ -1923,7 +1930,7 @@ class XrayEngine {
       log: { loglevel: 'warning' },
       inbounds,
       outbounds: [
-        { protocol: 'freedom', tag: 'direct' },
+        { protocol: 'freedom', tag: 'direct', settings: { domainStrategy: 'UseIPv4' } },
         { protocol: 'blackhole', tag: 'block' }
       ]
     };
