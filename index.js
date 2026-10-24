@@ -4771,101 +4771,169 @@ async function startGate(userConfig = {}) {
   Logger.item('UUID', bkMask(state.uuid) + (process.env.UUID || process.env.SB_UUID ? ' (from env)' : ' (saved/generated; set UUID to pin it)'));
 
   // 4. Resolve host / IP
-  const resolvedHost = await resolvePublicHost(config, state.publicHost || '');
+  let resolvedHost = await resolvePublicHost(config, state.publicHost || '');
   stateMgr.setPublicIp(resolvedHost);
   Logger.item('Resolved Host', resolvedHost);
 
-  // 5. Allocate dynamic internal ports
-  const allocatedPorts = {};
-  if (config.enable.vlessWs) allocatedPorts.vlessWs = await allocatePorts();
-  if (config.enable.vlessWsTls) allocatedPorts.vlessWsTls = await allocatePorts();
-  if (config.enable.vmessWs || config.enable.vmessWsTls) allocatedPorts.vmessWs = await allocatePorts();
-  if (config.enable.trojanGrpcTls) allocatedPorts.trojanGrpcTls = await allocatePorts();
-  if (config.enable.vlessHttpUpgrade) allocatedPorts.vlessHu = await allocatePorts();
-  if (config.enable.vlessGrpc || config.enable.vlessGrpcTls) allocatedPorts.vlessGrpc = await allocatePorts();
-  if (config.enable.vlessGrpcTls) allocatedPorts.vlessGrpcTls = await allocatePorts();
-  if (config.enable.vmessHttpUpgrade) allocatedPorts.vmessHu = await allocatePorts();
-  if (config.enable.trojanHttpUpgrade) allocatedPorts.trojanHu = await allocatePorts();
-  if (config.enable.ssWs) allocatedPorts.ssWs = await allocatePorts();
-  if (config.enable.trojanWs) allocatedPorts.trojanWs = await allocatePorts();
-  if (config.enable.reality) allocatedPorts.reality = await allocatePorts();
-  if (config.enable.shadowTlsVless) allocatedPorts.shadowTls = await allocatePorts();
-  if (config.enable.shadowsocks) allocatedPorts.shadowsocks = await allocatePorts();
-  if (config.enable.socks) allocatedPorts.socks = await allocatePorts();
-  if (config.enable.httpProxy) allocatedPorts.httpProxy = await allocatePorts();
-  if (config.enable.vlessXhttp) allocatedPorts.xray = await allocatePorts();
+  // 5-9. Engines, share links, panel, multiplexer.
+  // Everything lives in this closure so the web panel can apply new settings (protocols,
+  // host, node prefix) without a redeploy: save -> restart the engines -> regenerate links.
+  const gate = {
+    binManager: null,
+    singboxInstance: null,
+    xrayInstance: null,
+    argoInstance: null,
+    argoDomain: null,
+    allocatedPorts: {},
+    linkGen: null,
+    compatNodes: [],
+    allNodes: []
+  };
 
-  // 6. Manage Binaries
-  Logger.section('Engines & Binaries');
-  const binManager = new BinaryManager(config);
-
-  const hasSingBox = await binManager.ensureSingBox();
-  let hasXray = false;
-  if (config.enable.vlessXhttp || config.enable.ssWs) {
-    hasXray = await binManager.ensureXray();
-  }
-  let hasCloudflared = false;
-  if (config.enable.argo) {
-    hasCloudflared = await binManager.ensureCloudflared();
-  }
-
-  // 7. Start Engine Instances
-  let singboxInstance = null;
-  if (hasSingBox) {
-    singboxInstance = new SingBoxEngine(config, stateMgr, allocatedPorts);
-    singboxInstance.start();
-  } else {
-    Logger.warn('sing-box binary could not be started. (Mock/offline mode active).');
-  }
-
-  let xrayInstance = null;
-  config.xhttpPort = null;
-  config.ssWsPort = null;
-  if (hasXray && (allocatedPorts.xray || allocatedPorts.ssWs)) {
-    xrayInstance = new XrayEngine(config, stateMgr, { xhttp: allocatedPorts.xray, ssWs: allocatedPorts.ssWs });
-    if (xrayInstance.start()) {
-      config.xhttpPort = allocatedPorts.xray || null;
-      config.ssWsPort = allocatedPorts.ssWs || null;
-    } else {
-      Logger.warn('Xray-core did not start; VLESS-XHTTP / Shadowsocks-WS links hidden.');
+  async function stopEngines() {
+    for (const inst of [gate.singboxInstance, gate.xrayInstance, gate.argoInstance]) {
+      if (inst) { try { inst.stop(); } catch (_) {} }
     }
-  } else if (config.enable.vlessXhttp || config.enable.ssWs) {
-    Logger.warn('VLESS-XHTTP / Shadowsocks-WS enabled but Xray-core is not available; their links are hidden.');
+    gate.singboxInstance = null;
+    gate.xrayInstance = null;
+    gate.argoInstance = null;
+    gate.argoDomain = null;
+    config.xhttpPort = null;
+    config.ssWsPort = null;
+    // let the killed processes release their sockets before we grab new ports
+    await new Promise((r) => setTimeout(r, 500));
   }
 
-  let argoInstance = null;
-  let argoDomain = null;
-  if (hasCloudflared && config.enable.argo) {
-    argoInstance = new ArgoTunnel(config, config.publicPort);
-    argoDomain = await argoInstance.start();
+  async function startEngines() {
+    const allocatedPorts = gate.allocatedPorts;
+    for (const key of Object.keys(allocatedPorts)) delete allocatedPorts[key];
+
+    if (config.enable.vlessWs) allocatedPorts.vlessWs = await allocatePorts();
+    if (config.enable.vlessWsTls) allocatedPorts.vlessWsTls = await allocatePorts();
+    if (config.enable.vmessWs || config.enable.vmessWsTls) allocatedPorts.vmessWs = await allocatePorts();
+    if (config.enable.trojanGrpcTls) allocatedPorts.trojanGrpcTls = await allocatePorts();
+    if (config.enable.vlessHttpUpgrade) allocatedPorts.vlessHu = await allocatePorts();
+    if (config.enable.vlessGrpc || config.enable.vlessGrpcTls) allocatedPorts.vlessGrpc = await allocatePorts();
+    if (config.enable.vlessGrpcTls) allocatedPorts.vlessGrpcTls = await allocatePorts();
+    if (config.enable.vmessHttpUpgrade) allocatedPorts.vmessHu = await allocatePorts();
+    if (config.enable.trojanHttpUpgrade) allocatedPorts.trojanHu = await allocatePorts();
+    if (config.enable.ssWs) allocatedPorts.ssWs = await allocatePorts();
+    if (config.enable.trojanWs) allocatedPorts.trojanWs = await allocatePorts();
+    if (config.enable.reality) allocatedPorts.reality = await allocatePorts();
+    if (config.enable.shadowTlsVless) allocatedPorts.shadowTls = await allocatePorts();
+    if (config.enable.shadowsocks) allocatedPorts.shadowsocks = await allocatePorts();
+    if (config.enable.socks) allocatedPorts.socks = await allocatePorts();
+    if (config.enable.httpProxy) allocatedPorts.httpProxy = await allocatePorts();
+    if (config.enable.vlessXhttp) allocatedPorts.xray = await allocatePorts();
+
+    // 6. Manage Binaries
+    Logger.section('Engines & Binaries');
+    gate.binManager = gate.binManager || new BinaryManager(config);
+    const binManager = gate.binManager;
+
+    const hasSingBox = await binManager.ensureSingBox();
+    let hasXray = false;
+    if (config.enable.vlessXhttp || config.enable.ssWs) {
+      hasXray = await binManager.ensureXray();
+    }
+    let hasCloudflared = false;
+    if (config.enable.argo) {
+      hasCloudflared = await binManager.ensureCloudflared();
+    }
+
+    // 7. Start Engine Instances
+    if (hasSingBox) {
+      gate.singboxInstance = new SingBoxEngine(config, stateMgr, allocatedPorts);
+      gate.singboxInstance.start();
+    } else {
+      Logger.warn('sing-box binary could not be started. (Mock/offline mode active).');
+    }
+
+    if (hasXray && (allocatedPorts.xray || allocatedPorts.ssWs)) {
+      gate.xrayInstance = new XrayEngine(config, stateMgr, { xhttp: allocatedPorts.xray, ssWs: allocatedPorts.ssWs });
+      if (gate.xrayInstance.start()) {
+        config.xhttpPort = allocatedPorts.xray || null;
+        config.ssWsPort = allocatedPorts.ssWs || null;
+      } else {
+        Logger.warn('Xray-core did not start; VLESS-XHTTP / Shadowsocks-WS links hidden.');
+      }
+    } else if (config.enable.vlessXhttp || config.enable.ssWs) {
+      Logger.warn('VLESS-XHTTP / Shadowsocks-WS enabled but Xray-core is not available; their links are hidden.');
+    }
+
+    if (hasCloudflared && config.enable.argo) {
+      gate.argoInstance = new ArgoTunnel(config, config.publicPort);
+      gate.argoDomain = await gate.argoInstance.start();
+    }
+
+    return engineStatus();
   }
 
-  // 8. Generate share links & subscriptions
-  const linkGen = new LinkGenerator(config, stateMgr.state, resolvedHost);
-  const compatNodes = linkGen.getAllNodes({ compat: 'v2ray', argoDomain, allowLocalHostLinks: config.allowLocalHostLinks });
-  const allNodes = linkGen.getAllNodes({ compat: 'full', argoDomain, allowLocalHostLinks: true });
-  const links = compatNodes.map(n => n.uri);
-  const clashYaml = linkGen.buildClashMetaYaml(allNodes);
-  const singboxJson = linkGen.buildSingBoxClientJson(allNodes);
+  function engineStatus() {
+    return {
+      singbox: !!(gate.singboxInstance && gate.singboxInstance.process && !gate.singboxInstance.process.killed),
+      xray: !!(gate.xrayInstance && gate.xrayInstance.process && !gate.xrayInstance.process.killed),
+      argo: !!(gate.argoInstance && gate.argoInstance.process && !gate.argoInstance.process.killed)
+    };
+  }
 
-  stateMgr.setLinks(links, clashYaml, singboxJson);
+  /** (Re)generate every share link / subscription from the current config. */
+  function refreshLinks(host) {
+    gate.linkGen = new LinkGenerator(config, stateMgr.state, host || resolvedHost);
+    gate.compatNodes = gate.linkGen.getAllNodes({ compat: 'v2ray', argoDomain: gate.argoDomain, allowLocalHostLinks: config.allowLocalHostLinks });
+    gate.allNodes = gate.linkGen.getAllNodes({ compat: 'full', argoDomain: gate.argoDomain, allowLocalHostLinks: true });
+    stateMgr.setLinks(gate.compatNodes.map(n => n.uri), gate.linkGen.buildClashMetaYaml(gate.allNodes), gate.linkGen.buildSingBoxClientJson(gate.allNodes));
+  }
+
+  /**
+   * Apply settings posted by the panel: persist them, refresh the LIVE config object in place
+   * (same reference the engines / multiplexer / panel already hold), restart the engines and
+   * regenerate links. Panel path and public port are bound at boot, so changing them is
+   * reported back as restartRequired instead of silently failing.
+   */
+  async function applyPanelSettings(payload) {
+    const { settings, ignored } = owSanitizeSettings(payload);
+    const dataDir = config.paths.dataDir;
+    saveUserSettings(dataDir, owDeepAssign(loadUserSettings(dataDir), settings));
+
+    const before = { panelPath: config.panelPath, publicPort: config.publicPort };
+    const fresh = buildConfig(OW_CONFIG);
+    owDeepAssign(config, fresh);
+    const restartRequired = before.panelPath !== config.panelPath || before.publicPort !== config.publicPort;
+
+    await stopEngines();
+    const engines = await startEngines();
+
+    const host = await resolvePublicHost(config, stateMgr.state.publicHost || '');
+    if (host) { stateMgr.setPublicIp(host); resolvedHost = host; }
+    refreshLinks(resolvedHost);
+
+    Logger.success(`Panel settings applied: ${gate.compatNodes.length} configs regenerated.`);
+    return { applied: Object.keys(settings), ignored, engines, nodes: gate.compatNodes.length, restartRequired, host: resolvedHost };
+  }
+
+  const engineStatusGetter = () => engineStatus();
+
+  await startEngines();
+  refreshLinks(resolvedHost);
 
   // 9. HTTP Panel & TCP multiplexer
-  const engineStatusGetter = () => ({
-    singbox: !!(singboxInstance && singboxInstance.process && !singboxInstance.process.killed),
-    xray: !!(xrayInstance && xrayInstance.process && !xrayInstance.process.killed),
-    argo: !!(argoInstance && argoInstance.process && !argoInstance.process.killed)
+  const { server: expressServer, app: expressApp } = createHttpPanel(config, stateMgr, engineStatusGetter, () => resolvedHost, {
+    applySettings: applyPanelSettings,
+    currentSettings: () => ({
+      domain: config.domain, forceHost: config.forceHost, nodePrefix: config.nodePrefix,
+      sniHy2: config.sniHy2, massProxyUrl: config.massProxyUrl, channelUrl: config.channelUrl,
+      panelPath: config.panelPath, publicPort: config.publicPort,
+      allowLocalHostLinks: config.allowLocalHostLinks, enable: { ...config.enable }
+    })
   });
-
-  const { server: expressServer, app: expressApp } = createHttpPanel(config, stateMgr, engineStatusGetter, () => resolvedHost);
-  const tcpRouter = new TcpRouter(config, allocatedPorts, expressServer, expressApp);
+  const tcpRouter = new TcpRouter(config, gate.allocatedPorts, expressServer, expressApp);
   await tcpRouter.start();
-
   // 10. Summary
   const panelUrl = (config.forceHttps || bkOnEdgeHost()) && !isIpLiteral(resolvedHost)
     ? `https://${resolvedHost}/${config.panelPath}`
     : `http://${resolvedHost}:${config.publicPort}/${config.panelPath}`;
-  Logger.item('Link host / SNI', `${linkGen.host} / ${linkGen.tlsOpt.sni} (port ${linkGen.port}, fp=${linkGen.tlsOpt.fp || 'none'}, alpn=${linkGen.tlsOpt.alpn.join(',') || 'none'})`);
+  Logger.item('Link host / SNI', `${gate.linkGen.host} / ${gate.linkGen.tlsOpt.sni} (port ${gate.linkGen.port}, fp=${gate.linkGen.tlsOpt.fp || 'none'}, alpn=${gate.linkGen.tlsOpt.alpn.join(',') || 'none'})`);
   Logger.section('OnyxWing Gate Active');
   Logger.item('Host', bkPlatformName());
   Logger.item('Web Panel', panelUrl);
@@ -4874,9 +4942,9 @@ async function startGate(userConfig = {}) {
   // Graceful shutdown
   const shutdown = () => {
     Logger.info('Stopping OnyxWing Gate...');
-    if (singboxInstance) singboxInstance.stop();
-    if (xrayInstance) xrayInstance.stop();
-    if (argoInstance) argoInstance.stop();
+    if (gate.singboxInstance) gate.singboxInstance.stop();
+    if (gate.xrayInstance) gate.xrayInstance.stop();
+    if (gate.argoInstance) gate.argoInstance.stop();
     if (tcpRouter) tcpRouter.stop();
     try { BkTraffic.save(); } catch (_) {}
     process.exit(0);
@@ -4888,14 +4956,16 @@ async function startGate(userConfig = {}) {
   return {
     config,
     state: stateMgr.state,
-    nodes: compatNodes,
-    allNodes,
+    nodes: gate.compatNodes,
+    allNodes: gate.allNodes,
     panelUrl,
-    allocatedPorts,
+    allocatedPorts: gate.allocatedPorts,
     tcpRouter,
-    singboxInstance,
-    xrayInstance,
-    argoInstance,
+    singboxInstance: gate.singboxInstance,
+    xrayInstance: gate.xrayInstance,
+    argoInstance: gate.argoInstance,
+    applySettings: applyPanelSettings,
+    refreshLinks,
     shutdown
   };
 }
