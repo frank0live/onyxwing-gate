@@ -4794,16 +4794,22 @@ class TcpRouter {
     clientSocket.setTimeout(0);
     clientSocket.setKeepAlive(true, 10000);
     clientSocket.setNoDelay(true);
+    const owOwner = clientSocket.__owUser || null;
 
     const backend = net.connect(targetPort, '127.0.0.1', () => {
       backend.setTimeout(0);
       backend.setKeepAlive(true, 10000);
       backend.setNoDelay(true);
+      // Which user opened this connection: the admin API reports sing-box's side of it by port.
+      owMarkConn(backend.localPort, targetPort, owOwner);
       backend.write(firstChunk);
       if (label !== 'Internal-HTTPS') { // decrypted WS / HTTPUpgrade / XHTTP traffic is metered inside the HTTPS server
         BkTraffic.add(label, firstChunk ? firstChunk.length : 0, 0);
         BkTraffic.meter(label, clientSocket, backend);
       }
+      // Per-user byte metering: every byte that passes this socket pair while the connection is
+      // open is charged to whoever opened it, including short requests the admin API would miss.
+      if (owOwner) owMeter(clientSocket, backend, owOwner);
       clientSocket.pipe(backend);
       backend.pipe(clientSocket);
       clientSocket.resume();
@@ -4848,8 +4854,48 @@ class TcpRouter {
 
       let destPort = null;
       let label = 'Unknown Upgrade';
+      let personalPath = null;
       for (const [branded, legacy, port, lbl] of routes) {
         if (hit(branded) || hit(legacy)) { if (port) { destPort = port; label = lbl; } break; }
+      }
+
+      // Personal transport path: /<slug>-<token>-ws (and the other transports). It reaches the same
+      // backend as the shared path, but the token says whose connection it is - that is what makes
+      // per-user quota possible. An unknown or exhausted token is refused instead of sharing a slot.
+      if (!destPort) {
+        const personal = String(url).match(/^\/([a-z0-9]{2,16})-([A-Za-z0-9_-]{12,64})-(ws|vmess|trojan|hu|vmess-hu|trojan-hu|xh|ss)$/i);
+        if (personal) {
+          const rec = owUsers.fromPath(`${personal[1]}-${personal[2]}/x`);
+          const st = rec ? owUsers.status(rec.user) : null;
+          if (rec && st && st.enabled) {
+            const kind = personal[3].toLowerCase();
+            const map = {
+              ws: [this.ports.vlessWs, 'VLESS-WS', 'vlessWs'],
+              vmess: [this.ports.vmessWs, 'VMess-WS', 'vmessWs'],
+              trojan: [this.ports.trojanWs, 'Trojan-WS', 'trojanWs'],
+              hu: [this.ports.vlessHu, 'VLESS-HTTPUpgrade', 'vlessHu'],
+              'vmess-hu': [this.ports.vmessHu, 'VMess-HTTPUpgrade', 'vmessHu'],
+              'trojan-hu': [this.ports.trojanHu, 'Trojan-HTTPUpgrade', 'trojanHu'],
+              xh: [this.config.xhttpPort, 'VLESS-XHTTP', 'xhttp'],
+              ss: [this.config.ssWsPort, 'Shadowsocks-WS', 'ssWs']
+            };
+            const picked = map[kind];
+            if (picked && picked[0]) {
+              destPort = picked[0];
+              label = picked[1];
+              // The engine only knows its own fixed path, so the personal path is rewritten on the
+              // way in. It never reaches sing-box, which is what keeps the token private to us.
+              personalPath = OW_PATHS[picked[2]] || null;
+              socket.__owUser = rec.user.id;
+              owConnTouch.set(rec.user.id, Date.now());
+            }
+          } else {
+            Logger.info(`Personal path refused (${rec ? (st && st.reason) : 'unknown token'})`);
+            socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+            socket.destroy();
+            return;
+          }
+        }
       }
 
       this._upgradeCount = (this._upgradeCount || 0) + 1;
@@ -4867,8 +4913,11 @@ class TcpRouter {
         backend.setTimeout(0);
         backend.setKeepAlive(true, 10000);
         backend.setNoDelay(true);
+        if (socket.__owUser) owMarkConn(backend.localPort, destPort, socket.__owUser);
 
-        let headersStr = `${req.method} ${req.url} HTTP/${req.httpVersion}\r\n`;
+        // A personal path is rewritten to the engine's own path here, in the forwarded request line.
+        const fwdUrl = personalPath ? personalPath : req.url;
+        let headersStr = `${req.method} ${fwdUrl} HTTP/${req.httpVersion}\r\n`;
         for (let i = 0; i < req.rawHeaders.length; i += 2) {
           headersStr += `${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}\r\n`;
         }
@@ -4881,6 +4930,8 @@ class TcpRouter {
 
         BkTraffic.add(label, head && head.length ? head.length : 0, 0);
         BkTraffic.meter(label, socket, backend);
+        // Personal connections are charged here: this is the only socket pair their bytes cross.
+        if (socket.__owUser) owMeter(socket, backend, socket.__owUser);
         socket.pipe(backend);
         backend.pipe(socket);
       });
