@@ -786,6 +786,306 @@ function buildConfig(userOverrides = {}) {
   };
 }
 
+// --- Module: lib/users.js ---
+// Multiple subscription users on top of the single-port multiplexer.
+//
+// The gate is a single-UUID design, so "user bands" are layered on the HTTP side: every user gets
+// their own subscription paths (/<panel>/<slug>-<token>/sub). When a client fetches a subscription we
+// know exactly which user it is, and the subscription we hand back carries that user's own UUID.
+// Bytes are metered per user by watching the same socket pairs BkTraffic already counts, and when a
+// user runs out of quota or past their expiry the next request for their subscription is refused and
+// their UUID is dropped from the generated links. Enforcement is therefore at subscription refresh
+// time (a few minutes of lag at most) rather than per-packet, which keeps the hot path untouched.
+// --- Connection attribution ---
+// sing-box's admin API reports every proxied connection with its source port on the loopback side.
+// That port belongs to the router's own socket toward sing-box, so it identifies the user who opened
+// it exactly. Entries are short lived: a connection that never shows up is forgotten after 30s.
+const owConnOwner = new Map(); // localPort -> { userId, backendPort, at }
+const owConnTouch = new Map(); // userId -> last seen ms
+
+function owMarkConn(localPort, backendPort, userId) {
+  if (!localPort) return;
+  owConnOwner.set(localPort | 0, { userId: userId || null, backendPort: backendPort | 0, at: Date.now() });
+  if (owConnOwner.size > 4000) {
+    const cutoff = Date.now() - 60000;
+    for (const [k, v] of owConnOwner) if (v.at < cutoff) owConnOwner.delete(k);
+  }
+  if (userId) owConnTouch.set(userId, Date.now());
+}
+
+/** Copy the authenticated user of an upgraded connection onto the socket that faces sing-box. */
+function owCarryOwner(fromSocket, toSocket) {
+  const owner = fromSocket && fromSocket.__owUser;
+  if (owner && toSocket) toSocket.__owUser = owner;
+}
+
+/**
+ * Charge bytes on a socket pair to one user.
+ * Downlink is what the client actually received (the TCP that carried it), uplink is what it sent;
+ * both are counted once per buffer, so this is the same thing the traffic bar already shows.
+ */
+function owMeter(clientSocket, backendSocket, userId) {
+  clientSocket.on('data', (buf) => owUsers.addUsage(userId, buf.length, 0));
+  backendSocket.on('data', (buf) => owUsers.addUsage(userId, 0, buf.length));
+}
+
+function owHttpGet(port, urlPath) {
+  return new Promise((resolve) => {
+    const req = require('http').get({ host: '127.0.0.1', port, path: urlPath, timeout: 2500 }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { body += c; if (body.length > 4 * 1024 * 1024) req.destroy(); });
+      res.on('end', () => resolve(body));
+    });
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
+  });
+}
+
+// Per-connection bytes are already cumulative; keep the last value we counted per connection id so
+// each sample only adds the delta.
+const owConnSeen = new Map();
+
+async function owUsageTick() {
+  const body = await owHttpGet(OW_CLASH_API_PORT, '/connections');
+  if (!body) return;
+  let data;
+  try { data = JSON.parse(body); } catch (_) { return; }
+  const list = Array.isArray(data.connections) ? data.connections : [];
+  const live = new Set();
+  for (const c of list) {
+    const id = c && c.id;
+    if (!id) continue;
+    live.add(id);
+    const meta = c.metadata || {};
+    const srcPort = parseInt(meta.sourcePort, 10);
+    const owner = owConnOwner.get(srcPort);
+    if (!owner || !owner.userId) continue;
+    const up = Number(c.upload) || 0;
+    const down = Number(c.download) || 0;
+    const prev = owConnSeen.get(id);
+    const dUp = prev ? Math.max(0, up - prev.up) : up;
+    const dDown = prev ? Math.max(0, down - prev.down) : down;
+    owConnSeen.set(id, { up, down, user: owner.userId });
+    if (dUp || dDown) {
+      owUsers.addUsage(owner.userId, dUp, dDown);
+      owConnTouch.set(owner.userId, Date.now());
+    }
+  }
+  for (const [id, v] of owConnSeen) {
+    if (!live.has(id)) owConnSeen.delete(id);
+  }
+  // Drop attribution rows whose connection never materialised.
+  const cutoff = Date.now() - 30000;
+  for (const [port, v] of owConnOwner) {
+    if (v.at < cutoff && !owConnSeen.size) owConnOwner.delete(port);
+  }
+}
+
+let owUsageTimer = null;
+function owStartUsageMetering() {
+  if (owUsageTimer) return;
+  owUsageTimer = setInterval(() => { owUsageTick().catch(() => {}); }, 5000);
+  if (owUsageTimer.unref) owUsageTimer.unref();
+  Logger.info('Users: byte metering started (5s).');
+}
+
+const OW_USERS_FILE = 'users.json';
+// Loopback port for sing-box's Clash API, used only to read byte counters.
+const OW_CLASH_API_PORT = parseInt(process.env.OW_CLASH_API_PORT || '', 10) || 19090;
+const OW_USERNAME_RE = /^[a-zA-Z0-9_.\-]{2,32}$/;
+const OW_RESERVED_NAMES = ['admin', 'root', 'wing', 'sub', 'login', 'api', 'settings', 'users', 'panel', 'assets', 'health'];
+
+function owEmptyUsersDb() {
+  return { v: 1, users: [] };
+}
+
+function owUsersFile(dataDir) {
+  return path.join(dataDir, OW_USERS_FILE);
+}
+
+function owLoadUsers(dataDir) {
+  try {
+    const raw = fs.readFileSync(owUsersFile(dataDir), 'utf8');
+    const db = JSON.parse(raw);
+    if (!db || db.v !== 1 || !Array.isArray(db.users)) return owEmptyUsersDb();
+    db.users = db.users.filter(u => u && typeof u.id === 'string');
+    return db;
+  } catch (_) {
+    return owEmptyUsersDb();
+  }
+}
+
+function owSaveUsers(dataDir, db) {
+  const file = owUsersFile(dataDir);
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf8');
+  fs.renameSync(tmp, file);
+}
+
+const owUsers = (() => {
+  const GIB = 1024 * 1024 * 1024;
+  let db = owEmptyUsersDb();
+  let dataDir = null;
+  let dirty = false;
+  let lastSave = 0;
+
+  const find = (key) => db.users.find(u => u.id === key || u.token === key) || null;
+  const byName = (name) => db.users.find(u => String(u.name).toLowerCase() === String(name).toLowerCase()) || null;
+  const slugOf = (u) => String(u.slug || '').toLowerCase();
+
+  function persist(force) {
+    if (!dataDir || !dirty) return;
+    const now = Date.now();
+    if (!force && now - lastSave < 20000) return;
+    try { owSaveUsers(dataDir, db); dirty = false; lastSave = now; } catch (err) {
+      if (!persist._warned) { persist._warned = 1; Logger.warn('Could not save users.json: ' + err.message); }
+    }
+  }
+
+  return {
+    init(dir) {
+      dataDir = dir;
+      db = owLoadUsers(dir);
+      try { owSaveUsers(dir, db); } catch (_) {}
+      const t = setInterval(() => persist(false), 15000);
+      if (t.unref) t.unref();
+      Logger.info(`Users: ${db.users.length} saved in ${path.join(dir, OW_USERS_FILE)}`);
+    },
+
+    all() { return db.users.map(u => ({ ...u, usage: Object.assign({ up: 0, down: 0, total: 0 }, u.usage || {}) })); },
+
+    get(key) { const u = find(key); return u ? { ...u } : null; },
+
+    /** Does a user still have traffic + time left? */
+    status(u, now = Date.now()) {
+      if (!u) return { enabled: false, reason: 'missing' };
+      if (u.enabled === false) return { enabled: false, reason: 'disabled' };
+      const used = (u.usage && u.usage.total) || 0;
+      const limit = (u.quotaGB || 0) * GIB;
+      const expired = u.expiresAt ? new Date(u.expiresAt).getTime() <= now : false;
+      if (expired) return { enabled: false, reason: 'expired', used, limit, remaining: Math.max(0, limit - used) };
+      if (limit > 0 && used >= limit) return { enabled: false, reason: 'quota', used, limit, remaining: 0 };
+      return { enabled: true, reason: 'ok', used, limit, remaining: limit > 0 ? limit - used : null };
+    },
+
+    /** Seconds until expiry (negative when already past), or null when the user never expires. */
+    secondsLeft(u, now = Date.now()) {
+      if (!u || !u.expiresAt) return null;
+      return Math.floor((new Date(u.expiresAt).getTime() - now) / 1000);
+    },
+
+    add({ name, quotaGB, days, note }) {
+      const nm = String(name || '').trim();
+      if (!OW_USERNAME_RE.test(nm)) return { ok: false, error: 'Name must be 2-32 chars: letters, digits, dot, dash, underscore.' };
+      if (OW_RESERVED_NAMES.includes(nm.toLowerCase())) return { ok: false, error: 'That name is reserved.' };
+      if (byName(nm)) return { ok: false, error: 'A user with that name already exists.' };
+      const q = Number(quotaGB);
+      if (!isFinite(q) || q < 0 || q > 1024 * 100) return { ok: false, error: 'Quota must be 0 (unlimited) or a positive number of GB.' };
+      const d = days === undefined || days === null || days === '' ? 30 : Number(days);
+      if (!isFinite(d) || d < 0 || d > 3650) return { ok: false, error: 'Days must be between 0 (never expires) and 3650.' };
+
+      const token = crypto.randomBytes(12).toString('base64url');
+      const user = {
+        id: crypto.randomUUID(),
+        name: nm,
+        slug: nm.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 16) || 'user',
+        uuid: crypto.randomUUID(),
+        token,
+        quotaGB: q,
+        usage: { up: 0, down: 0, total: 0 },
+        expiresAt: d > 0 ? new Date(Date.now() + d * 86400000).toISOString() : null,
+        enabled: true,
+        note: String(note || '').slice(0, 200),
+        createdAt: new Date().toISOString()
+      };
+      db.users.push(user);
+      dirty = true; persist(true);
+      return { ok: true, user: { ...user } };
+    },
+
+    update(id, patch) {
+      const u = find(id);
+      if (!u) return { ok: false, error: 'No such user.' };
+      if (patch.name !== undefined) {
+        const nm = String(patch.name).trim();
+        if (!OW_USERNAME_RE.test(nm)) return { ok: false, error: 'Invalid name.' };
+        const other = byName(nm);
+        if (other && other.id !== u.id) return { ok: false, error: 'Another user already has that name.' };
+        u.name = nm;
+      }
+      if (patch.quotaGB !== undefined) {
+        const q = Number(patch.quotaGB);
+        if (!isFinite(q) || q < 0) return { ok: false, error: 'Invalid quota.' };
+        u.quotaGB = q;
+      }
+      if (patch.days !== undefined) {
+        const d = Number(patch.days);
+        if (!isFinite(d) || d < 0) return { ok: false, error: 'Invalid days.' };
+        u.expiresAt = d > 0 ? new Date(Date.now() + d * 86400000).toISOString() : null;
+      }
+      if (patch.expiresAt !== undefined) {
+        const t = patch.expiresAt === null ? null : new Date(patch.expiresAt);
+        if (t && isNaN(t.getTime())) return { ok: false, error: 'Invalid date.' };
+        u.expiresAt = t ? t.toISOString() : null;
+      }
+      if (patch.enabled !== undefined) u.enabled = Boolean(patch.enabled);
+      if (patch.note !== undefined) u.note = String(patch.note).slice(0, 200);
+      if (patch.resetUsage) { u.usage = { up: 0, down: 0, total: 0 }; }
+      dirty = true; persist(true);
+      return { ok: true, user: { ...u } };
+    },
+
+    remove(id) {
+      const i = db.users.findIndex(u => u.id === id);
+      if (i < 0) return { ok: false, error: 'No such user.' };
+      const [gone] = db.users.splice(i, 1);
+      dirty = true; persist(true);
+      return { ok: true, user: gone };
+    },
+
+    /** New UUID + token: kills every previously handed-out config within one refresh. */
+    rotate(id) {
+      const u = find(id);
+      if (!u) return { ok: false, error: 'No such user.' };
+      u.uuid = crypto.randomUUID();
+      u.token = crypto.randomBytes(12).toString('base64url');
+      dirty = true; persist(true);
+      return { ok: true, user: { ...u } };
+    },
+
+    /** Count bytes for whichever user owns this connection, if any. */
+    addUsage(userId, up, down) {
+      if (!userId || (!up && !down)) return;
+      const u = db.users.find(x => x.id === userId);
+      if (!u) return;
+      const usage = u.usage || (u.usage = { up: 0, down: 0, total: 0 });
+      usage.up += up || 0;
+      usage.down += down || 0;
+      usage.total = usage.up + usage.down;
+      dirty = true;
+    },
+
+    save() { persist(true); },
+
+    /** Subscription URL paths for one user (relative to the panel path). */
+    pathsFor(u) {
+      const s = slugOf(u);
+      return { sub: `${s}-${u.token}/sub`, raw: `${s}-${u.token}/raw` };
+    },
+
+    /** Resolve a request path like "<slug>-<token>/sub" back to a user, cheaply. */
+    fromPath(rest) {
+      const seg = String(rest || '').split('/')[0] || '';
+      const m = seg.match(/^([a-z0-9]{2,16})-([A-Za-z0-9_-]{12,64})$/);
+      if (!m) return null;
+      const u = db.users.find(x => slugOf(x) === m[1] && x.token === m[2]) || null;
+      if (!u) return null;
+      return { user: u, kind: String(rest || '').split('/')[1] || 'sub' };
+    }
+  };
+})();
+
 // --- Module: lib/ports.js ---
 /**
  * Finds an available TCP port on localhost (127.0.0.1)
