@@ -62,6 +62,8 @@ No database, no build step — upload and run.
 Env vars set the starting point; after that everything lives in `ow-data/settings.json` and can be
 changed from **Settings** in the panel:
 
+![Settings](docs/settings.jpg)
+
 - domain / forced host, node name prefix, panel path, public port
 - per-protocol on/off switches (HTTPUpgrade, gRPC, XHTTP, REALITY, WireGuard…)
 
