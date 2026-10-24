@@ -3566,7 +3566,7 @@ rules:
 }
 
 // --- Module: lib/panel/http-panel.js ---
-function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostGetter) {
+function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostGetter, settingsHooks = {}) {
   const app = express();
   const panelPath = config.panelPath.replace(/^\//, '') || 'wing';
 
@@ -4088,6 +4088,33 @@ function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostG
     if (!isFinite(gb) || gb < 0 || gb > 1000000) return res.status(400).json({ ok: false, error: 'invalid value' });
     BkTraffic.setMonthUsedGB(gb); Logger.info(`Traffic: this month's used amount set to ${gb} GiB from the panel.`);
     res.setHeader('Cache-Control', 'no-store'); res.json(BkTraffic.snapshot());
+  });
+
+  // ===== Runtime settings API =====
+  // Every value the panel shows here is editable: protocols, host, node prefix, panel path.
+  // Saving restarts the engines and regenerates the share links in place, so no redeploy is
+  // needed for a protocol or hostname change.
+  app.get(`/${panelPath}/api/settings`, bkSessionOnly, (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    if (typeof settingsHooks.currentSettings !== 'function') {
+      return res.status(501).json({ ok: false, error: 'settings not available' });
+    }
+    res.json({ ok: true, settings: settingsHooks.currentSettings() });
+  });
+
+  app.post(`/${panelPath}/api/settings`, bkSessionOnly, bkSameOrigin, express.json({ limit: '16kb' }), async (req, res) => {
+    if (typeof settingsHooks.applySettings !== 'function') {
+      return res.status(501).json({ ok: false, error: 'settings not available' });
+    }
+    try {
+      const result = await settingsHooks.applySettings(req.body || {});
+      Logger.warn(`Panel settings updated (${result.applied.join(', ') || 'no changes'}).`);
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      Logger.error(`Panel settings update failed: ${err && err.message ? err.message : err}`);
+      res.status(500).json({ ok: false, error: err && err.message ? err.message : 'apply failed' });
+    }
   });
 
   app.get(`/${panelPath}`, authMiddleware, renderPanel);
