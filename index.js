@@ -4475,6 +4475,88 @@ function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostG
 
   app.get(`/${panelPath}`, authMiddleware, renderPanel);
 
+  // --- Users: management API (panel session only) ---
+  app.get(`/${panelPath}/api/users`, bkSessionOnly, bkSameOrigin, (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const now = Date.now();
+    res.json({
+      ok: true,
+      users: owUsers.all().map(u => {
+        const st = owUsers.status(u, now);
+        return {
+          id: u.id, name: u.name, note: u.note || '',
+          quotaGB: u.quotaGB,
+          usedBytes: (u.usage && u.usage.total) || 0,
+          upBytes: (u.usage && u.usage.up) || 0,
+          downBytes: (u.usage && u.usage.down) || 0,
+          quotaBytes: (u.quotaGB || 0) * (1024 ** 3),
+          remainingBytes: st.remaining,
+          expiresAt: u.expiresAt, secondsLeft: owUsers.secondsLeft(u, now),
+          enabled: u.enabled !== false, state: st.reason,
+          lastSeen: owConnTouch.get(u.id) || null,
+          paths: owUsers.pathsFor(u),
+          createdAt: u.createdAt
+        };
+      })
+    });
+  });
+
+  app.post(`/${panelPath}/api/users`, bkSessionOnly, bkSameOrigin, express.json({ limit: '4kb' }), async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const b = req.body || {};
+    const out = owUsers.add({ name: b.name, quotaGB: b.quotaGB, days: b.days, note: b.note });
+    if (!out.ok) return res.status(400).json({ ok: false, error: out.error });
+    if (settingsHooks.restartForUsers) await settingsHooks.restartForUsers();
+    res.json({ ok: true, user: { id: out.user.id, name: out.user.name, paths: owUsers.pathsFor(out.user) } });
+  });
+
+  app.post(`/${panelPath}/api/users/:id`, bkSessionOnly, bkSameOrigin, express.json({ limit: '4kb' }), async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const b = req.body || {};
+    let out;
+    if (b.action === 'rotate') out = owUsers.rotate(req.params.id);
+    else if (b.action === 'delete') out = owUsers.remove(req.params.id);
+    else out = owUsers.update(req.params.id, b);
+    if (!out.ok) return res.status(400).json({ ok: false, error: out.error });
+    // Rotating or deleting changes the accepted UUIDs; plain edits (quota, note) do not.
+    if (b.action === 'rotate' || b.action === 'delete') {
+      if (settingsHooks.restartForUsers) await settingsHooks.restartForUsers();
+    }
+    res.json({ ok: true, user: out.user && { id: out.user.id, name: out.user.name } });
+  });
+
+  // --- Users: personal subscriptions ---
+  // /<panel>/<slug>-<token>/sub and /raw. No cookie: the token in the path is the credential, which
+  // is what a VPN client can refresh on its own. A user that is out of traffic or past expiry keeps
+  // getting an answer, but an empty one, so the client shows an expired profile instead of failing.
+  app.get(new RegExp(`^/${panelPath}/([a-z0-9]{2,16})-([A-Za-z0-9_-]{12,64})/(sub|raw|clash)$`), (req, res) => {
+    const pathOnly = req.path.replace(new RegExp(`^/${panelPath}/`), '');
+    const rec = owUsers.fromPath(pathOnly);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    if (!rec) return res.status(404).send('unknown subscription');
+    const st = owUsers.status(rec.user);
+    const host = getRequestHost(req);
+    const linkGen = new LinkGenerator(
+      { ...config, personalToken: `${rec.user.slug}-${rec.user.token}` },
+      { ...stateManager.state, uuid: rec.user.uuid },
+      host
+    );
+    if (!st.enabled) {
+      res.setHeader('Subscription-Userinfo', `upload=0; download=${st.used || 0}; total=${st.limit || 0}; expire=${rec.user.expiresAt ? Math.floor(new Date(rec.user.expiresAt).getTime() / 1000) : 0}`);
+      return res.send('');
+    }
+    const nodes = linkGen.getAllNodes({ compat: 'v2ray', allowLocalHostLinks: true });
+    const links = nodes.map(n => n.uri);
+    const text = links.join('\n');
+    const expire = rec.user.expiresAt ? Math.floor(new Date(rec.user.expiresAt).getTime() / 1000) : 0;
+    res.setHeader('Profile-Update-Interval', '12');
+    res.setHeader('Subscription-Userinfo', `upload=${(rec.user.usage && rec.user.usage.up) || 0}; download=${(rec.user.usage && rec.user.usage.down) || 0}; total=${st.limit || 0}; expire=${expire}`);
+    if (rec.kind === 'raw') return res.send(text);
+    res.send(Buffer.from(text).toString('base64'));
+  });
+
+
   // Subscriptions: Base64 & Raw (HTTP & HTTPS compatible for v2rayN, v2rayNG, Hiddify)
   app.get([`/${panelPath}/base64`, `/${panelPath}/raw`, `/${panelPath}/sub`, '/sub', '/base64'], authMiddleware, (req, res) => {
     const isBase64 = req.path.endsWith('/base64') || req.path.endsWith('/sub') || req.path === '/sub';
