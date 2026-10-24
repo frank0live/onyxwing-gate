@@ -78,6 +78,29 @@ out-of-range values are rejected instead of written, so a typo can't break the c
 }
 ```
 
+## Users
+
+One gate can serve several people without running separate instances. Every person gets a row in
+`ow-data/users.json`, their own UUID and their own pair of paths, so two subscriptions never share a
+credential.
+
+![Users](docs/users.jpg)
+
+- traffic allowance per user, with a meter that fills as they use it
+- expiry date; once it passes, the subscription comes back empty and the path stops answering
+- **New link** rotates the token and the UUID in one go — the old link dies immediately
+- **Pause** keeps the account and its history but cuts it off
+
+Usage is counted on the sockets the gate already owns, so nothing extra is polled and the number in
+the panel is the number that actually crossed the connection. Adding or changing a user restarts the
+engines: the set of accepted UUIDs lives in the generated sing-box config, and it has to be rebuilt
+for the new one to work.
+
+Two things to know: the personal paths are rewritten to the engine's own path before the request is
+forwarded, so a token never appears in the sing-box config; and the quota is enforced when the
+subscription is refreshed, which is what the client does on its own every few hours. Someone who
+never refreshes keeps working until their client does.
+
 ## Support
 
 - 💬 Telegram: [@master_supports](https://t.me/master_supports)
