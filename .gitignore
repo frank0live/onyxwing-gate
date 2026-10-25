@@ -3,3 +3,4 @@ ow-data/
 data/
 *.log
 .DS_Store
+.env
