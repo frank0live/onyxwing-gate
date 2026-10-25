@@ -4,7 +4,7 @@
 
 # OnyxWing Gate
 
-**One port. Total freedom.**
+**Every protocol, on the one port you were given.**
 
 </div>
 
