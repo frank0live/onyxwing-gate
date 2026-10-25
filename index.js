@@ -2267,6 +2267,12 @@ class SingBoxEngine {
   }
 
   _spawn() {
+    // A reload can land while the previous instance is still running; two of them fight over the
+    // local admin port and the loser exits, which then looks like a crash loop in the logs.
+    if (this.process && this.process.pid) {
+      try { this.process.removeAllListeners('exit'); this.process.kill('SIGKILL'); } catch (_) {}
+      this.process = null;
+    }
     try {
       if (fs.existsSync(this.paths.singboxLog) && fs.statSync(this.paths.singboxLog).size > 5 * 1024 * 1024) {
         fs.truncateSync(this.paths.singboxLog, 0);
